@@ -31,7 +31,7 @@
 - [x] Add a basic GitHub Actions compile/test workflow and README build instructions.
 - [x] Confirm `./gradlew test build` passes and open a reviewable PR.
 
-Local `./gradlew test build` passed on Temurin 21. The completing pull request is linked after it is opened.
+Local `./gradlew test build` passed on Temurin 21. Completed in https://github.com/cbrwvy/contextforge/pull/2.
 
 **Handoff gate:** M1.1 must be merged into `main` before the Java developer starts implementation branches based on it.
 
