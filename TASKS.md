@@ -1,6 +1,6 @@
 # ContextForge Development Tasks
 
-> **Status:** Planning / initial bootstrap. This file is a task checklist, not a claim that features are implemented.
+> **Status:** M1.1 is in review. Later tasks are not implemented. This file is a task checklist, not a claim that those later features exist.
 >
 > **Source of truth for requirements:** [docs/PRD.md](docs/PRD.md). Read [docs/idea.md](docs/idea.md) for the project vision. If this checklist and the PRD disagree, discuss the discrepancy in a PR before implementation.
 
@@ -22,21 +22,23 @@
 
 ## M1 — Foundation library
 
-### M1.1 — Java project bootstrap (maintainer; in progress)
+### M1.1 — Java project bootstrap (maintainer)
 
-- [ ] Configure Java 21, Gradle Kotlin DSL, and Maven coordinates `io.github.cbrwvy:contextforge`.
-- [ ] Commit a functioning Gradle Wrapper and configure JUnit Jupiter.
-- [ ] Create one dependency-free core JAR and minimal package structure.
-- [ ] Add immutable foundational identifiers and 64-bit Unicode code-point span types, with validation tests.
-- [ ] Add a basic GitHub Actions compile/test workflow and README build instructions.
-- [ ] Confirm `./gradlew test build` passes and open a reviewable PR.
+- [x] Configure Java 21, Gradle Kotlin DSL, and Maven coordinates `io.github.cbrwvy:contextforge`.
+- [x] Commit a functioning Gradle Wrapper and configure JUnit Jupiter.
+- [x] Create one dependency-free core JAR and minimal package structure.
+- [x] Add immutable foundational identifiers and 64-bit Unicode code-point span types, with validation tests.
+- [x] Add a basic GitHub Actions compile/test workflow and README build instructions.
+- [x] Confirm `./gradlew test build` passes and open a reviewable PR.
+
+Local `./gradlew test build` passed on Temurin 21. Completed in https://github.com/cbrwvy/contextforge/pull/2.
 
 **Handoff gate:** M1.1 must be merged into `main` before the Java developer starts implementation branches based on it.
 
 ### M1.2 — Input and streaming decode (Java developer)
 
 - [ ] Support `String`/`CharSequence`, `Reader`, `InputStream` with explicit charset, and structured messages.
-- [ ] Define source ownership and validation behavior; reject malformed charset input.
+- [ ] Define source ownership and validation behavior; reject malformed charset input and unpaired UTF-16 surrogates while reading, without buffering the source.
 - [ ] Process incremental reads, including code points split across chunks, without buffering an entire Preserve stream.
 - [ ] Add ASCII, Cyrillic, CJK, emoji/ZWJ, combining-mark, BOM, and invalid-UTF-8 fixtures.
 - [ ] Test a generated input larger than the configured test heap; verify bounded-memory streaming behavior.
