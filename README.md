@@ -6,9 +6,26 @@ The library is intended to select relevant passages, drop exact duplicates in a 
 
 ## Status
 
-The project is in the design stage. The library has not been implemented, and there is no published API artifact yet.
+The Java 21 build and the first public types are in the repository. Those types are caller-supplied identifiers and half-open 64-bit Unicode code-point spans. Streaming ingestion, normalization, segmentation, pattern matching, deduplication, and context packing are not implemented yet.
 
-The documents in this repository describe planned behavior. They are not a claim that the capabilities below already exist.
+There is no published artifact yet. The documents in this repository describe the planned behavior of the later milestones. They are not a claim that the capabilities below already exist.
+
+## Building
+
+Install JDK 21, then use the Gradle Wrapper checked into the repository:
+
+```bash
+./gradlew test
+./gradlew build
+```
+
+On Windows, use `gradlew.bat` instead of `./gradlew`.
+
+`test` compiles the library and runs the unit tests. `build` also packages the jar and checks that the core runtime classpath has no third-party libraries. The first run downloads the Gradle distribution pinned by the wrapper and the JUnit Jupiter test dependency. Later runs reuse the local cache.
+
+Maven coordinates are `io.github.cbrwvy:contextforge`. The current version is `0.1.0-SNAPSHOT`. JUnit Jupiter is a test dependency only.
+
+GitHub Actions runs `./gradlew build` on Temurin 21.
 
 ## Planned capabilities
 

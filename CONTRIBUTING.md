@@ -39,4 +39,4 @@ If a secret is committed by mistake, rotate it. Removing it from a later commit 
 
 Review for correctness, narrow scope, tests, and documentation. Prefer a follow-up pull request over expanding an already focused change.
 
-A pull request that changes library behavior should state what was verified. Until continuous integration exists, the author runs the relevant tests locally and records that in the pull request.
+A pull request that changes library behavior should state what was verified. GitHub Actions compiles the library and runs the unit tests on Java 21. Run the same checks locally before opening the pull request and record the result in the description.
