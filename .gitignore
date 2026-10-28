@@ -1,0 +1,48 @@
+# Java compiler and JVM crash artifacts
+*.class
+hs_err_pid*
+replay_pid*
+*.hprof
+
+# Build outputs. The Gradle Wrapper JAR is a project file and stays tracked.
+*.jar
+*.war
+*.ear
+*.nar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Gradle
+.gradle/
+build/
+
+# Local Maven output, if a contributor builds with Maven
+target/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Temporary and editor scratch files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+*.orig
+*.rej
