@@ -10,7 +10,7 @@
 
 This document turns the project idea into a proposed requirements baseline for a standalone Java library. It is a design contract for review, not a description of existing code. No ContextForge library, command-line tool, or published artifact exists yet.
 
-The idea document remains the direction statement. Where this PRD chooses among options the idea left open, the choice is labeled as a proposal. [Open questions](#165-open-questions) lists the decisions that still need a maintainer.
+The idea document remains the direction statement. Decisions already made, and the questions that can wait, are in [section 16.5](#165-decisions-and-remaining-questions).
 
 The scope is sized for two developers. The core is an in-process library. Optional behavior is added by caller-supplied implementations or, later, by a separate artifact that depends on the core. The design does not add a required service, a model provider, or a distributed runtime.
 
@@ -58,7 +58,7 @@ Callers need one preparation layer that:
 - accepts inputs larger than the memory they are willing to spend on the final package
 - finds configured patterns and exact duplicates across the whole input
 - builds a smaller package when the caller asks for one
-- states, in the result, every omission and every generated span
+- accounts for every omission and every generated span, and says when a cap has replaced per-segment detail with a coarser tail
 
 ### 2.2 In scope
 
@@ -119,12 +119,12 @@ Streaming rules:
 
 - Preserve-mode writing uses a bounded carry buffer. For newline canonicalization the buffer holds at most a trailing carriage return so a CRLF pair split across reads is recognized.
 - Literal pattern search uses a carry buffer of `longestPattern - 1` code points so a match split across reads is recognized.
-- A streaming session is pull-based and single-threaded. The library does not create an executor.
+- A streaming session is pull-based and single-threaded. The library does not create an executor. Finishing a session into a package follows the `prepare` memory rule. `write` is the bounded Preserve path.
 - `Pipeline` configuration is immutable and safe to share. A `StreamingSession` is not.
 - Closing a source closes only resources the library opened. A caller-owned `Reader` or `InputStream` is left open for the caller to close, unless the caller uses a factory method that documents ownership.
-- `write` returns a report of transforms, counts, and the token estimate. The report does not embed the copied text. The bytes go only to the caller-supplied sink.
+- `write` returns counts, transforms, and the built-in token estimate when that estimator is selected. It does not embed the copied text, and it does not run a custom estimator over the stream. The bytes go only to the caller-supplied sink.
 
-Selective packing cannot both keep a globally exact ranking and bound memory by a constant independent of the corpus. The memory model in [section 12](#12-performance-and-memory-goals) states the distinction. Preserve-mode streaming can stay bounded. Selective mode retains candidate segment text up to a configured cap.
+Preserve `write` and a match scan that does not store matches are the bounded-memory paths. Selective `prepare` keeps a span index and the segment text it still needs. [Section 3.6](#36-memory-provenance-and-truncation) is the memory and provenance rule. [Section 12](#12-performance-and-memory-goals) repeats it as a performance goal.
 
 ### 3.2 Pattern matching
 
@@ -132,7 +132,7 @@ MVP pattern matching is literal, multi-pattern, and code-point based. A match re
 
 Required behavior:
 
-- Overlapping and nested literal matches are all reported.
+- Overlapping and nested literal matches are all observed. Stored records follow the cap in [section 3.6](#36-memory-provenance-and-truncation).
 - An empty pattern is rejected.
 - Patterns are matched against normalized text when a transform is enabled, and the reported span is mapped back to decoded text.
 - The library does not rewrite the pattern string. Callers who enable newline canonicalization should pass patterns in that same form.
@@ -140,9 +140,9 @@ Required behavior:
 - Case-insensitive matching is not an MVP feature. Java lowercasing, Unicode case folding, and locale-specific case pairs differ, especially for Turkish. A later mode must name the exact case rule and ship fixtures for it.
 - Regular expressions are not an MVP feature. They bring backtracking risk and a second match semantics. A later design can add them behind a separate type with an explicit limit on match effort.
 
-The suggested implementation is an Aho–Corasick automaton, or another algorithm with the same observable result: every literal occurrence, linear in the input length plus the number of matches, with automaton memory determined by the pattern set. The public contract is the match set, not the automaton.
+The suggested implementation is an Aho–Corasick automaton, or another algorithm with the same observable result: every literal occurrence, linear in the input length plus the number of matches, with automaton memory determined by the pattern set. The public contract is that observable result, including truncation flags, not the automaton.
 
-Match storage is capped by `Limits.maxMatches`. When the cap is hit, the scan can continue to increment a total count, the stored list stops growing, and the report sets `matchesTruncated`. The default cap is a guard against untrusted pattern sets and noisy inputs. It is a proposed default in [section 8](#8-error-handling), and it is not a measured capacity.
+Match storage is capped by `Limits.maxMatches`. When that cap is hit, the scan can continue and increment a total count, the stored list stops growing, and the report sets `matchesTruncated`. That storage cap is separate from `analysisTruncated`, which stops classification of a tail. The default cap is a guard against untrusted pattern sets and noisy inputs. It is a proposed default in [section 8](#8-error-handling), and it is not a measured capacity.
 
 ### 3.3 Duplicate and near-duplicate detection
 
@@ -155,7 +155,7 @@ Each group records:
 - the source span of every member
 - whether the group is exact
 
-`DuplicatePolicy.GROUP` keeps every copy available to the packer and annotates the group. `DuplicatePolicy.COLLAPSE` exposes only the representative to the packer and still lists every member span in the report. Collapse never discards the last copy. Preserve mode does not remove text. In Preserve mode the same grouping is advisory data on the report.
+`DuplicatePolicy.GROUP` keeps every copy available to the packer and annotates the group. A copy that is not packed is an omission, and the group still cites it. `DuplicatePolicy.COLLAPSE` exposes only the representative to the packer. The other members are the collapsed-duplicate covering, not a second omission list. Collapse never discards the last copy. Member spans that were actually grouped are part of the `prepare` index. A tail marked `TRUNCATED` is not grouped. Preserve mode does not remove text. In Preserve mode the same grouping is advisory data on the report.
 
 Near-duplicate detection is post-MVP. It is approximate, off unless the caller selects it, and every group it produces is marked `approximate = true`. An approximate group is not an assertion that the texts are identical or that one may stand in for the other without loss. The report must carry the algorithm identifier and the configured threshold.
 
@@ -184,7 +184,7 @@ Transport compression may wrap a Preserve-mode byte stream. It is an encoding of
 
 ### 3.5 Source provenance
 
-Every original segment carries a source identifier and a decoded-text span. Every pattern match and every duplicate member carries a span. Every omission carries a span and a reason code. Every summary carries the spans it was derived from and does not carry a span that presents the summary as a quotation.
+Every original segment carries a source identifier and a decoded-text span. Every stored pattern match and every grouped duplicate member carries a span. Every omission carries a span and a reason code. Every summary carries the spans it was derived from and does not carry a span that presents the summary as a quotation.
 
 The report is part of the result object. It is not a log line. A caller can serialize it, store it, and later resolve a span against the original source they still hold.
 
@@ -192,8 +192,8 @@ Required report contents:
 
 - library version string, or `unknown` when the manifest has no implementation version
 - processing mode
-- `lossy` and `transformed` flags
-- estimator identifier and the package token estimate
+- `lossy` and `transformed`. A `prepare` report also includes `partitionComplete`. `analysisTruncated` is set when a cap stopped classification. Preserve `write` does not include `partitionComplete`
+- estimator identifier, and the package token estimate when an estimate applies. Preserve `write` leaves a custom estimate unset
 - configured budget, when one was set
 - transforms applied, in order
 - segments, with kind, text, span or derived-from spans, and reasons
@@ -202,17 +202,35 @@ Required report contents:
 - omitted spans with reason codes
 - counts: input code points, segment count, retained count, omitted count, duplicate group count
 
-Reason codes include at least `SELECTED`, `DUPLICATE`, `BUDGET`, `EXCEEDS_BUDGET`, `NOT_SELECTED`, `NEIGHBOR` (when neighbor expansion exists), and `SUMMARY_SOURCE`.
+Segment reasons and omission reasons are different lists. A kept segment uses `SELECTED`, a feature reason, `NEIGHBOR` once neighbor expansion exists, or `SUMMARY_SOURCE` on a later summary. An omission span uses `BUDGET`, `EXCEEDS_BUDGET`, `NOT_SELECTED`, `SEGMENT_BOUNDARY`, or `TRUNCATED`.
 
-Partition rule for Preserve and Selective: every code point of every source is retained, listed as a collapsed duplicate member, or listed as omitted. No code point is in two of those sets. Empty input is valid and produces an empty package with `lossy = false` for Preserve and an empty selection for Selective.
+Partition rule for `prepare`: when `partitionComplete` is true, every code point of every source sits in exactly one covering: a retained original span, a collapsed-duplicate member span, or an omission span. A duplicate group may also cite a span. That citation is an index, not a second covering. Empty input is valid and produces an empty package with `lossy = false` and `partitionComplete = true`.
+
+Preserve `write` does not build this span partition. Completeness for that path is the sink round-trip in section 4.
+
+### 3.6 Memory, provenance, and truncation
+
+A bounded buffer and a complete per-segment index are different promises. The MVP does not treat them as the same path.
+
+| Path | Memory | Provenance |
+| --- | --- | --- |
+| Preserve `write` | Independent of input length, aside from the carry buffer, the decoder buffer, and the caller-owned sink | Transforms, output code-point count, and, when the built-in estimator is selected, a token estimate derived from that count. No omission list. A custom `TokenEstimator` is not applied to the stream, and the custom estimate is left unset |
+| Literal scan that counts matches or streams them to a caller sink | Independent of input length, aside from the automaton, the carry buffer, and the match being emitted | Every match is observed. Stored records stop at the match cap. Further matches increment a count and set `matchesTruncated` |
+| Selective `prepare`, and exact duplicate grouping | Proportional to retained segment text, distinct grouped texts, and the span index | Omitted wording is not copied into the package. Omissions are coalesced spans. Grouping keeps one representative string per distinct text it grouped, plus the member spans |
+
+Adjacent omission spans with the same reason are merged. The index grows with the number of runs, not with the size of the omitted wording. That growth belongs to `prepare`. It is not a constant bound.
+
+When the retention cap stops storage of another segment body, classification of new segments stops. The remainder of that source is one tail span with reason `TRUNCATED`. The tail keeps the partition complete. The report sets `analysisTruncated`. Matches and duplicate groups are not claimed inside the tail. `partitionComplete` is false only when the remainder cannot be bounded. In that case the package says so and is not presented as a full accounting.
+
+`lossy` is true when any omission span exists or any summary segment is present. Exact collapse does not by itself add an omission: the non-representative spans are the collapsed covering, and their wording is the retained representative. A collapsed copy whose representative was not retained still leaves that representative on the omission list, so `lossy` is true. A Selective package that retains every source code point, with no boundary spans and no tail, has `lossy = false`. Preserve `write` does not become lossy because an estimate exceeds a budget. The full output is still produced, and `budgetExhausted` records the comparison.
 
 ## 4. Lossless and lossy processing
 
 ### 4.1 Modes
 
-`ProcessingMode` has three values.
+The modes are Preserve, Selective, and, after the MVP, Summarized. M1 does not need to publish a third constant if a request for generated text fails clearly.
 
-**Preserve.** The output contains the complete decoded text, after only those transforms the caller enabled. With `Normalization.none()` and no byte-order-mark strip, the result is lossless at the Unicode code-point level: concatenating the output yields the same scalar values as the decoded input. A token budget, when supplied, is compared with the estimate and recorded. Preserve does not truncate to meet the budget. If the caller needs a smaller package, they select Selective or Summarized.
+**Preserve.** The output contains the complete decoded text, after only those transforms the caller enabled. With `Normalization.none()` and no byte-order-mark strip, the sink output of `write`, or the package text of a materialized `prepare`, is lossless at the Unicode code-point level: concatenating that output yields the same scalar values as the decoded input. The `write` report stores counts and transforms, not a second copy of the text. A token budget, when supplied, is compared with the estimate and recorded. An estimate over the budget sets `budgetExhausted` and leaves `lossy` false. Preserve does not truncate to meet the budget. If the caller needs a smaller package, they select Selective or Summarized.
 
 A gzip (or similar) wrapper around Preserve output is lossless encoding. It does not reduce the token estimate of the text inside it. `write` streams that output to a caller-supplied sink and returns the report described in [section 3.1](#31-streaming-text-processing).
 
@@ -220,30 +238,30 @@ A gzip (or similar) wrapper around Preserve output is lossless encoding. It does
 
 **Summarized.** The output may contain original excerpts and summary segments produced by a `Summarizer` the caller supplies. The core library does not include a summarizer implementation and does not include a client for any model provider. Summary segments use `SegmentKind.SUMMARY`, include `derivedFrom` spans, and are excluded from quote-fidelity checks. Summarized mode is lossy. The summary may omit details, generalize, or misstate what the source said. The library does not claim that a summary preserves facts, quotations, or every relevant passage.
 
-Summarized mode is specified now so the result model has a place for it. The implementation milestone is after the MVP. Until that milestone, requesting Summarized mode fails with a clear exception.
+The result model has a place for summaries after the MVP. Until that milestone, a request for generated text fails with a clear error.
 
 ### 4.2 Flags
 
 | Flag | Set when |
 | --- | --- |
-| `lossy` | Any source text was omitted, or any summary segment is present |
+| `lossy` | Any omission span exists, or any summary segment is present. [Section 3.6](#36-memory-provenance-and-truncation) covers exact collapse and Preserve budgets |
 | `transformed` | Any enabled normalization or decoding rule changed decoded text |
-| `budgetExhausted` | A budget was set and at least one candidate was skipped or left out because of it |
+| `budgetExhausted` | A budget was set and the estimate exceeds it, or at least one candidate was left out because of the budget |
 | `matchesTruncated` | The match store hit its cap |
+| `analysisTruncated` | A cap stopped classification and the remainder is a `TRUNCATED` tail, or the remainder could not be bounded |
+| `partitionComplete` | On a `prepare` report, the coverings in section 3.5 partition every source. Unset on Preserve `write`, which has no span partition |
 
 Preserve with `Normalization.none()` and no BOM has `lossy = false` and `transformed = false`.
 
-Newline canonicalization sets `transformed = true` and, in Preserve mode, `lossy = false`. It is a declared structural change, not a summary. The offset map records each carriage return that was removed or each line separator that was rewritten, so the change is auditable. Callers who need byte-faithful or code-point-faithful text leave normalization off. The project does not call a transforming configuration lossless.
-
-Selective mode sets `lossy = true` even when every retained quote is exact.
+Newline canonicalization and the whitespace profile set `transformed = true`. In Preserve mode they leave `lossy = false`. Each is a declared structural change, not a summary. The offset map records every deleted or rewritten code point. A transformed segment's code-point length can differ from `end - start` of its decoded span. Quote checks apply the recorded transforms to the decoded span and compare that with the segment text. The token estimator sees the transformed segment string, not the span length. Callers who need byte-faithful or code-point-faithful text leave normalization off. The project does not call a transforming configuration lossless.
 
 ### 4.3 What is guaranteed
 
 | Guarantee | Preserve, no transform | Selective | Summarized |
 | --- | --- | --- | --- |
-| Decoded code points can be reconstructed from the result | Yes | No | No |
-| Retained `ORIGINAL` text equals the cited source slice | Yes | Yes | Yes, for original segments only |
-| Every source code point appears in exactly one of retained, collapsed-duplicate, or omitted | Yes | Yes | Yes, for the underlying source partition. Summaries are additional derived segments |
+| Decoded code points can be reconstructed | Yes, from the `write` sink or from materialized `prepare` text. The `write` report alone does not hold that text | No | No |
+| Retained `ORIGINAL` text equals the decoded span after the enabled transforms | Yes | Yes | Yes, for original segments only |
+| `prepare` coverings partition every source code point | On materialized `prepare`, yes. `write` has no span partition | When `partitionComplete` is true | When `partitionComplete` is true. Summaries are additional derived segments |
 | Facts, answers, and task relevance are preserved | The text is complete, so nothing was selected away | No | No |
 | Token estimate matches a given provider tokenizer | No | No | No |
 
@@ -278,13 +296,13 @@ Features, each recorded as a reason when it contributes:
 - distinct configured pattern matched in the segment
 - extra exact-duplicate copies beyond the representative, capped
 
-Initial weights live in one class and are covered by tests. They are part of the deterministic contract for a given library version. Changing them is a behavior change and belongs in the release notes. This PRD does not freeze the numeric weights before implementation, because they should be tuned against the planted-evidence fixtures. It does freeze the feature list, the integer type, and the tie-break.
+The feature list above is the MVP heuristic. Scores are integers. The tie-break above is the initial total order. Weights and the tie-break key order are locked by tests when M3 implements them. Either may change before the first preview tag if a fixture shows a problem. That change updates the tests in the same pull request. Neither is a compatibility promise before 1.0.0.
 
 Tie-break, in order: higher score, earlier source in the composite order, earlier span start, then segment identifier lexicographically. The last key exists so two segments with the same span metadata still sort stably.
 
 ### 5.3 What selection does not mean
 
-A high score means the configured features fired. It does not mean the segment answers the task, and a zero score does not mean the segment is irrelevant. The report's reasons exist so a caller can see which features fired. Evaluation measures recall of planted evidence. It does not treat the heuristic as a relevance oracle.
+A high score means the configured features fired. It does not mean the segment answers the task, and a zero score does not mean the segment is irrelevant. The report's reasons exist so a caller can see which features fired. Evaluation measures planted-evidence retention separately from omission disclosure. A disclosed omission is not retained evidence. The heuristic is not a relevance oracle.
 
 ### 5.4 Token budget
 
@@ -306,16 +324,16 @@ public interface TokenEstimator {
 }
 ```
 
-The built-in estimator id is `codepoints-divided-by-4`. Its value is `(codePointCount + 3) / 4`. This is a rough stand-in sometimes used for English text. It is a poor estimate for many scripts, including CJK text, where a model may use far more tokens per code point. The report always includes the estimator id. The library does not ship tokenizer vocabularies and does not claim this estimate matches any provider.
+The initial built-in estimator id is `codepoints-divided-by-4`. Its value is `(codePointCount + 3) / 4`, using the transformed text the caller will receive. This is a rough stand-in sometimes used for English text. It is a poor estimate for many scripts, including CJK text, where a model may use far more tokens per code point. The report includes the active estimator id. The library does not ship tokenizer vocabularies and does not claim this estimate matches any provider. The id and the divisor are the initial definition. They may change before the first preview tag. The 1.0.0 release is the compatibility point. Preserve `write` derives this built-in value from the running output code-point count and does not buffer the stream to do it.
 
 A caller who has a real tokenizer implements `TokenEstimator` and passes it in. That implementation lives outside the core jar.
 
-Budget exhaustion is a normal result, not an exception. The package is returned with `lossy = true` and omission records.
+Budget exhaustion is a normal result, not an exception. Selective mode returns the package and records the omissions. `lossy` follows [section 3.6](#36-memory-provenance-and-truncation). The reported `estimatedTokens` value is this packing cost, not `estimator.estimate` of the segments concatenated with their separators. Those integers differ when the estimator rounds each piece, which the initial built-in estimator does. Sums use 64-bit arithmetic. A negative estimate is rejected.
 
 Packing strategies:
 
 - `Packing.greedySkip()` considers candidates in tie-break order and skips a candidate that does not fit. This is the default.
-- `Packing.stopOnOverflow()` stops at the first candidate that does not fit, leaving later candidates unconsidered. Those later candidates are omitted with reason `NOT_SELECTED`.
+- `Packing.stopOnOverflow()` stops at the first candidate that does not fit. That candidate is omitted with `EXCEEDS_BUDGET`. Later candidates are omitted with `NOT_SELECTED`.
 
 The library does not split a segment below the configured segmenter to force it into the budget. A segment larger than the remaining budget, or larger than the whole budget, is omitted with `EXCEEDS_BUDGET`. Callers who want smaller units select a finer segmenter. Sentence segmentation is deferred because sentence boundaries are language-specific.
 
@@ -328,6 +346,10 @@ Output order is independent of consideration order. The default `OutputOrder.SOU
 | `Segmenter.messages()` | Yes | One segment per message. Patterns do not cross messages |
 | `Segmenter.documents()` | Yes | One segment per source |
 | `Segmenter.paragraphs()` | Yes | Split on blank lines in normalized text. A final segment without a trailing blank line is kept |
+
+The packed text of a message is `Message.text()` only. Speaker, timestamp, and metadata stay on the report. They affect the token total only through the caller-supplied overhead fields. The library does not prepend a speaker label to the text.
+
+`Segmenter.paragraphs()` splits the normalized text on blank lines. A blank line is a line-break sequence, optional U+0009 or U+0020 characters, and another line-break sequence. The paragraph bodies become segments. The blank-line code points are omission spans with reason `SEGMENT_BOUNDARY`, so a document that contains a blank line is `lossy` even when every paragraph body is kept. Callers who want every code point retained use `Segmenter.documents()` or Preserve. Line breaks are the set in the normalization note under [section 6](#6-functional-requirements).
 
 Markdown structure, code fences, and HTML blocks are not parsed in the MVP. A paragraph inside a code sample is still a paragraph to `Segmenter.paragraphs()`.
 
@@ -345,12 +367,12 @@ Priority `MVP` is required for the first usable library slice. Priority `Later` 
 | FR-06 | `Normalization.none()` is the default. `Normalization.newlines()` and `Normalization.whitespace()` are opt-in. Newlines rewrites CR, CRLF, and Unicode line separators to LF, including pairs split across reads. Whitespace includes that rewrite, collapses each run of spaces and tabs to one space, and drops trailing spaces and tabs at line ends | MVP |
 | FR-07 | Every transform is named on the report, in application order, and sets `transformed` | MVP |
 | FR-08 | The three MVP segmenters exist and are deterministic | MVP |
-| FR-09 | Literal multi-pattern search reports every match on the full normalized input, including overlapping matches | MVP |
+| FR-09 | Literal multi-pattern search observes every match on the configured input, including overlapping matches. Stored matches stop at the cap and set `matchesTruncated` | MVP |
 | FR-10 | Each match carries a pattern id and a decoded-text span | MVP |
 | FR-11 | Exact duplicate groups use string equality of normalized segment text and list every member span | MVP |
 | FR-12 | The caller can group duplicates or collapse them to a deterministic representative. Preserve mode does not delete text | MVP |
 | FR-13 | Near-duplicate grouping is opt-in, approximate, labeled, and absent from the default pipeline | Later |
-| FR-14 | Preserve, Selective, and Summarized are the only processing modes. Summarized fails clearly until its milestone | MVP contract, Later implementation for Summarized |
+| FR-14 | MVP implements Preserve and Selective. A request for generated summaries fails with a clear error until the summarizer milestone. Exception class names are not frozen | MVP |
 | FR-15 | Preserve with no transform round-trips decoded code points and does not truncate to a token budget | MVP |
 | FR-16 | Every `ORIGINAL` segment's text equals the decoded source slice after the enabled transforms | MVP |
 | FR-17 | Summary segments are labeled `SUMMARY`, carry derived-from spans, and are never quote-checked as originals | Later |
@@ -358,19 +380,19 @@ Priority `MVP` is required for the first usable library slice. Priority `Later` 
 | FR-19 | Heuristic selection uses the documented integer features, reasons, and tie-break | MVP |
 | FR-20 | Prefix selection exists as an explicit strategy for source-order packing | MVP |
 | FR-21 | Token accounting includes segment text, configured overhead, and separators, and never accepts a package over the budget | MVP |
-| FR-22 | The caller can replace the estimator. The built-in estimator id is `codepoints-divided-by-4` | MVP |
+| FR-22 | The caller can replace the estimator. The MVP includes the documented code-point heuristic in section 5.4. Its id and divisor are the initial definition, not a 1.0 contract | MVP |
 | FR-23 | Greedy-skip and stop-on-overflow packing exist | MVP |
 | FR-24 | Default output order is source order. Score order is opt-in | MVP |
-| FR-25 | The report satisfies the partition rule and includes the fields in [section 3.5](#35-source-provenance) | MVP |
+| FR-25 | A `prepare` report with `partitionComplete` satisfies the partition rule and includes the fields in [section 3.5](#35-source-provenance). Preserve `write` reports counts and transforms instead of a span partition | MVP |
 | FR-26 | Omissions use the documented reason codes. Budget exhaustion returns a package and does not throw | MVP |
-| FR-27 | Pattern detection and duplicate detection run before packing, on the complete configured input | MVP |
+| FR-27 | Pattern detection and duplicate detection run before packing. They cover the complete configured input when `analysisTruncated` is false. A `TRUNCATED` tail is excluded from both results | MVP |
 | FR-28 | Limits reject excessive pattern sets and cap stored matches and retained segments, with truncation or a limit error as specified | MVP |
 | FR-29 | A no-op listener is the default. Events omit source text unless the caller opts in | MVP |
-| FR-30 | Message timestamps do not reorder input unless the caller selects timestamp order | MVP |
+| FR-30 | MVP keeps message input order regardless of timestamps. Timestamp reordering is Later | MVP |
 | FR-31 | A selected message can pull neighboring messages into the package when they fit, with reason `NEIGHBOR` | Later |
 | FR-32 | A command-line wrapper can run Preserve and Selective on a file or UTF-8 stdin and write the package as JSON | Later |
 
-`Normalization.whitespace()` is an MVP profile and stays off unless the caller selects it. It can change indentation and aligned text, so it sets `transformed` and records an offset map. Stripping zero-width characters and other technical noise is a later profile, because those characters are sometimes meaningful. Unicode normalization forms and case-insensitive patterns are also later, and opt-in. NFKC, if it is ever offered, must set `transformed`, because it changes compatibility characters.
+Line breaks for `Normalization.newlines()`, `Normalization.whitespace()`, and paragraph splitting are the set matched by Java's `\R`: U+000A, U+000B, U+000C, U+000D, U+0085, U+2028, and U+2029. U+000D U+000A is one break. `newlines()` rewrites each break to U+000A. `whitespace()` does that, collapses each run of U+0009 and U+0020 to one U+0020, and removes trailing U+0009 and U+0020 before a line break. It stays off unless the caller selects it. It can change indentation and aligned text, so it sets `transformed` and records an offset map. Stripping zero-width characters and other technical noise is a later profile, because those characters are sometimes meaningful. Unicode normalization forms and case-insensitive patterns are also later, and opt-in. NFKC, if it is ever offered, must set `transformed`, because it changes compatibility characters.
 
 ## 7. Non-functional requirements
 
@@ -381,7 +403,7 @@ Priority `MVP` is required for the first usable library slice. Priority `Later` 
 | NFR-03 | For a fixed input, configuration, and library version, deterministic stages return equal packages, including report order |
 | NFR-04 | The core does not open sockets, read credentials, start background threads, or emit telemetry. Tests run without a network connection |
 | NFR-05 | Offsets, matching, and estimation are defined on Unicode scalar values. Fixtures cover the scripts and sequences in [section 10](#10-unicode-support) |
-| NFR-06 | Preserve-mode streaming and literal scanning do not retain the full input. Selective retention follows the published cap. Tests demonstrate both properties |
+| NFR-06 | Preserve `write`, and a literal scan that does not store matches, do not retain the full input. Selective `prepare` follows [section 3.6](#36-memory-provenance-and-truncation): it retains packed text and a span index, and a cap ends classification with a `TRUNCATED` tail. Tests cover the bounded paths and the capped tail |
 | NFR-07 | Exceptions and default listener events may include source ids and offsets. They omit source text unless a documented debug flag or listener detail is enabled. That flag defaults to off |
 | NFR-08 | A pipeline is immutable. A session is confined to one thread. The documentation states this |
 | NFR-09 | Before 1.0.0, a minor version may change public behavior. From 1.0.0, the project uses semantic versioning. Behavior changes in weights, estimator formulas, or default limits are release-note items |
@@ -389,14 +411,14 @@ Priority `MVP` is required for the first usable library slice. Priority `Later` 
 | NFR-11 | The MVP is implementable by two people as the milestone sequence in section 15, without a service deployment |
 | NFR-12 | The machine-readable report is sufficient to audit a package without reading library logs |
 
-Proposed Maven coordinates, to confirm before the first published artifact:
+Agreed Maven coordinates:
 
 - Group: `io.github.cbrwvy`
 - Artifact: `contextforge`
 - Module name, if a module descriptor is added later: `io.github.cbrwvy.contextforge`
 - Base package: `io.github.cbrwvy.contextforge`
 
-The build tool for implementation is Gradle, using the checked-in wrapper. The wrapper JAR and properties are project files and must remain tracked. Kotlin DSL is the recommended build-script form. The Gradle version is chosen when the build is introduced, from a current stable release. This PRD does not add the build yet.
+The build tool for implementation is Gradle with the Kotlin DSL, using the checked-in wrapper. The wrapper JAR and properties are project files and must remain tracked. The Gradle version is chosen when the build is introduced, from a current stable release. This PRD does not add the build yet.
 
 ## 8. Error handling
 
@@ -410,13 +432,13 @@ Failures split into caller mistakes, defective input, resource guards, and ordin
 | Byte sequence illegal for the charset | `InvalidSourceException` | Caused by the decoder failure |
 | I/O error while reading | checked `IOException` | Declared on `prepare` and `write` |
 | Pattern count, pattern length, or a caller-set input cap exceeded | `LimitExceededException` | Thrown before unbounded allocation where the limit can be checked up front |
-| Stored matches or retained segments hit their cap | normal report flags | `matchesTruncated` or a retained-segment truncation flag. Processing returns a partial, explicit result |
-| Token budget cannot fit a candidate | normal package | Omission reason, `lossy = true` |
+| Stored matches or retained segments hit their cap | normal report flags | `matchesTruncated` or `analysisTruncated`. A selective tail uses one `TRUNCATED` span as defined in section 3.6 |
+| Token budget cannot fit a candidate in Selective mode | normal package | Omission reason. `lossy` follows section 3.6. Preserve does not omit text to meet a budget |
 | `write` called when the mode is not Preserve | `IllegalStateException` | Selective results are packages, not a full copy |
 | Session used after `finish` or `close` | `IllegalStateException` | |
-| Summarized mode before its milestone, or Summarized without a summarizer | `UnsupportedModeException` | Subclass of `ContextForgeException` |
+| Generated summaries requested before that milestone, or requested without a summarizer | unsupported-mode error | Unchecked. The class name is not frozen |
 
-`ContextForgeException` is the unchecked base for `InvalidSourceException`, `LimitExceededException`, and `UnsupportedModeException`. Programming errors stay on the JDK types `NullPointerException`, `IllegalArgumentException`, and `IllegalStateException`.
+`ContextForgeException` is the unchecked base for invalid source data, limit failures, and unsupported modes. Programming errors stay on the JDK types `NullPointerException`, `IllegalArgumentException`, and `IllegalStateException`. The exception names in this section are the initial sketch. M1 may rename them. The failure categories are the requirement.
 
 Proposed default guards, subject to confirmation before the API is stable:
 
@@ -425,7 +447,7 @@ Proposed default guards, subject to confirmation before the API is stable:
 | Patterns | 10,000 | `LimitExceededException` |
 | Code points in one pattern | 1,024 | `LimitExceededException` |
 | Stored matches | 100,000 | Stop storing, keep counting, set `matchesTruncated` |
-| Retained segment texts during a streaming selective prepare | 100,000 | Stop retaining further segment text, record the truncation, omit the rest with an explicit reason |
+| Retained segment texts during selective `prepare` | 100,000 | Stop classifying further segments. Cover the remainder with one `TRUNCATED` tail and set `analysisTruncated` |
 | Input code points | No default cap | If the caller sets one, exceeding it throws `LimitExceededException` |
 
 Callers who process untrusted input should set an input cap and review the match and retention caps. The library still treats all text as data: it does not evaluate expressions, load classes from input, or interpret markup.
@@ -449,20 +471,22 @@ Near-duplicate algorithms and caller-supplied estimators, rankers, and summarize
 
 ## 10. Unicode support
 
-The public offset unit is the Unicode code point (scalar value) in decoded text. Spans are half-open. This keeps an emoji that is one supplementary-plane character as one unit, which a raw Java `char` index would split into a surrogate pair.
+The public offset unit is the Unicode code point (scalar value) in decoded text. Spans are half-open and use a 64-bit count (`long`). A stream can pass `Integer.MAX_VALUE` code points, so a 32-bit offset is not the public span type. Token budgets stay separate: `maxTokens` is a package limit and may use a 32-bit count because it bounds the packed output, not the source.
+
+Decoded text is the scalar sequence produced by the charset decoder, before BOM stripping and before normalization. A leading U+FEFF that came from a UTF-8 BOM is a code point at the start of that sequence. Stripping it is transform `UTF8_BOM`. The offset map records the deletion, later spans skip that code point, and `transformed` is set.
 
 Consequences the API must document:
 
 - Callers with a Java `String` convert with `Character.offsetByCodePoints` or an equivalent helper the library provides.
 - A grapheme cluster, such as a family emoji joined by ZWJ, can be several code points. The MVP does not snap spans to grapheme boundaries. A literal match may begin or end inside a cluster. Fixtures must include a ZWJ sequence so this stays visible.
 - Combining character sequences are matched as separate code points. The library does not apply NFC or NFD by default, because those forms change the sequence.
-- A byte span is available only on the byte-stream path, where the decoder can record the byte position of each code point. The MVP report's required span is the code-point span. Byte offsets are a later addition if a caller needs them. They are not invented for `Reader` input.
+- When a transform changes length, `end - start` on the decoded span is not the code-point length of the segment string. Quote fidelity and token estimates use the rules in section 4.2.
+- Byte offsets are not an MVP report field. A later addition can record them on the byte-stream path. They are not invented for `Reader` input.
 
 Decoding:
 
 - The charset is explicit for byte streams.
 - UTF-8 is the charset used by convenience constructors and by project fixtures.
-- A leading UTF-8 byte-order mark, when the library decodes the bytes, is removed and recorded as transform `UTF8_BOM`. It sets `transformed`.
 - Illegal sequences fail the call by default. A replace action, if added, is opt-in, recorded, and sets `transformed`.
 
 Required fixture coverage:
@@ -513,7 +537,7 @@ These are algorithm goals for the core implementations. A caller-supplied estima
 | --- | --- |
 | Preserve `write` to a caller-supplied sink | Retained memory is independent of input length, aside from the carry buffer, the decoder buffer, and the sink the caller owns |
 | Literal scan that counts matches or streams them to a caller sink | Retained memory is independent of input length, aside from the automaton, the carry buffer, and the match currently being emitted |
-| Selective or exact-duplicate prepare that retains segment text | Memory grows with retained segment text. The retention cap bounds how much text the library keeps. It also means a capped run is a partial ranking, and the report says so |
+| Selective `prepare` and exact duplicate grouping | Memory grows with retained segment text, distinct grouped texts, and the span index. The retention cap stops further classification and covers the remainder with one `TRUNCATED` tail. `analysisTruncated` and `partitionComplete` can both be true. This path does not promise memory independent of input length |
 | Near-duplicate sketches, when implemented | Memory grows with the number of segments sketched. The feature documents that growth. It is off by default |
 
 A test for the streaming paths must process a generated input larger than the JVM heap configured for that test, while counting matches or writing Preserve output, and must complete without storing the input. The heap size and input size are chosen in the test when it is written. They are not claimed here as an observed result.
@@ -551,15 +575,15 @@ These are the primary metrics. Compression ratio is not one of them.
 | Metric | Definition |
 | --- | --- |
 | Quote fidelity | For every `ORIGINAL` segment, text equals the cited source slice after enabled transforms. Target: every segment, on every fixture |
-| Provenance resolvability | Every original segment and every match has a source id and a span that locates the text. Target: every item |
-| Partition coverage | The retained, collapsed-duplicate, and omitted spans partition each source. Target: every fixture |
-| Planted-evidence recall | Fraction of planted relevant spans that appear as original excerpts, or that are omitted with the correct span and a reason, when the budget is large enough to hold them. The threshold for a given fixture is set with that fixture, not in this PRD |
+| Provenance resolvability | Every original segment and every stored match has a source id and a span that locates the text. Unstored matches are represented by `matchesTruncated` and a count. Target: every stored item |
+| Partition coverage | When `partitionComplete` is true, every source code point sits in exactly one covering. This measures disclosure. It does not measure retention |
+| Planted-evidence retention | Fraction of planted spans covered by an `ORIGINAL` segment whose text matches the transformed source. An omission does not count, even when the omission span and reason are correct. On a fixture whose budget can hold the planted spans and whose caps are not hit, the target is full retention |
 | Duplicate correctness | Precision and recall of exact groups against the manifest. Target: exact agreement on the equality fixtures |
 | Summary labeling | When Summarized mode exists, every generated segment is `SUMMARY`, has derived-from spans, and fails a check if it is marked `ORIGINAL` |
 | Determinism | Two runs produce equal packages |
 | Estimator error | Optional later comparison against a caller-supplied reference tokenizer. Reported as a distribution of estimate minus reference. Never reported as proof of exact token counts |
 
-A Selective run can list a planted span as omitted and still pass disclosure. A separate assertion, on fixtures whose budget is defined to fit the planted spans, checks that those spans were retained. Both numbers are reported. Hiding omissions would inflate apparent recall.
+Retention and partition coverage are both reported. A planted span that appears only as an omission passes partition coverage and fails retention. A fixture with room in the budget asserts retention. A tighter budget asserts the omission span and reason, and that omission is not counted as retention.
 
 ### 13.3 Performance harness
 
@@ -588,14 +612,16 @@ The project does not ship a dataset of personal conversations, support tickets, 
 The MVP is the first usable library slice: milestones M1 through M3. A Java caller can, from their own application:
 
 - stream plain text and prepare an in-memory message list
-- apply no normalization, or newline canonicalization, and see that choice on the report
+- apply no normalization, newline canonicalization, or the whitespace profile, and see that choice on the report
 - search a literal pattern set over the full input
 - group or collapse exact duplicates
 - select segments with the heuristic or with an explicit prefix
 - pack them under a token budget using the built-in or a custom estimator
-- read a package whose original excerpts resolve to source spans and whose omissions are listed
+- read a `prepare` package whose original excerpts resolve to source spans and whose omissions are coalesced spans
 
-Preserve and Selective work. Summarized is rejected with `UnsupportedModeException`. There is no command-line tool, no near-duplicate detector, and no embedding ranker in the MVP.
+Preserve and Selective work. A request for generated summaries fails until its milestone. There is no command-line tool, no near-duplicate detector, and no embedding ranker in the MVP. Constant-memory streaming is Preserve `write` and match emission. Selective provenance is the span index described in section 3.6, not a second copy of the corpus and not an O(1) heap.
+
+The illustrative types in section 16.4 are not extra MVP surface. M1 implements the smallest types that satisfy the behavioral requirements.
 
 ### 14.2 Non-goals
 
@@ -682,7 +708,8 @@ Deliver the task, heuristic and prefix selection, both packing strategies, both 
 Acceptance:
 
 - FR-14 for Preserve and Selective, and FR-16, FR-19 through FR-26, have tests
-- Summarized mode throws `UnsupportedModeException`
+- A request for generated summaries fails with a documented error
+- A retention-cap fixture sets `analysisTruncated`, covers the remainder with one `TRUNCATED` span, and does not count that tail as retained evidence
 - Quote fidelity and partition coverage hold on the fixture set
 - A segment larger than the budget is omitted with `EXCEEDS_BUDGET` and is not split
 - Package cost never exceeds `maxTokens` in a property test over generated segments
@@ -716,7 +743,7 @@ Acceptance:
 
 ### 15.8 M6 — Integration and release hygiene
 
-Deliver usage examples, a thin command-line wrapper (FR-32), semantic-versioning notes, a security-reporting document, and a repeatable benchmark job. Publishing to a public artifact repository waits on the coordinate decision in section 16.
+Deliver usage examples, a thin command-line wrapper (FR-32), semantic-versioning notes, a security-reporting document, and a repeatable benchmark job. The Maven coordinates are decided. Publishing to a public artifact repository waits on the release-channel choice in section 16.5.
 
 Acceptance:
 
@@ -734,7 +761,7 @@ Acceptance:
 | Risk | Why it matters | Mitigation in this design |
 | --- | --- | --- |
 | Callers treat the built-in estimator as an exact tokenizer | A downstream request can overflow a real context window | Estimator id is on every report. Documentation states the formula and its bias. A custom estimator is a first-class API |
-| Callers treat heuristic selection as complete recall | Relevant text can be omitted with a confident-looking package | Reasons are feature-level. Lossy is set. Evaluation uses planted recall plus disclosed omissions. The objective string is not described as understood |
+| Callers treat heuristic selection as complete retention | Relevant text can be omitted with a confident-looking package | Reasons are feature-level. Omissions set `lossy`. Evaluation reports planted retention and partition coverage as separate numbers. The objective string is not described as understood |
 | Exact hashes used as identity | A collision would merge different texts | Equality confirms group membership |
 | Near-duplicate false merges | Different passages could be collapsed | Feature is off by default, groups are marked approximate, and collapse of approximate groups requires an explicit policy at implementation time |
 | UTF-16 versus code-point confusion | Java APIs use `char` indexes. Emoji and supplementary characters would get the wrong span | Public spans are code points. A helper converts. Fixtures include supplementary characters |
@@ -748,7 +775,7 @@ Acceptance:
 
 - **Code-point spans instead of Java `char` indexes.** Callers do a conversion. Spans stay meaningful for supplementary characters.
 - **Global detection before packing.** The scan sees the whole input, which is the correct search result, and the implementation must stream or cap storage rather than concatenate a second copy of the corpus for each stage.
-- **Candidate cap instead of unbounded exact ranking.** Very large selective runs stay inside a memory guard and must admit they are partial.
+- **Candidate cap instead of an unbounded exact ranking.** Past the cap, selective `prepare` stops classifying and covers the rest with one tail span. The span index itself still grows with the number of runs before the cap.
 - **No regular expressions in the MVP.** Callers with regex needs keep them outside, or wait for a later bounded design. The core avoids backtracking on untrusted patterns.
 - **No bundled tokenizer.** Estimates can disagree with a provider. The core stays small and provider-agnostic.
 - **Integer heuristic features instead of embeddings.** Results are explainable and offline. Semantic recall is weaker. Embeddings can arrive later as a caller-supplied ranker.
@@ -786,7 +813,7 @@ Packages under `io.github.cbrwvy.contextforge`:
 
 ### 16.4 Proposed Java API
 
-The types below are illustrative. They are not implemented, and names may change before a preview release. They are the concrete shape the requirements assume.
+The types below are an illustration, not a signature that M1 must copy. Names, builders, and exception types may change before a preview release. The behavioral requirements are sections 6 and 8, together with the memory rule in section 3.6. Offsets in the illustration use `long`.
 
 Pipeline construction:
 
@@ -824,8 +851,8 @@ try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
         if (segment.kind() == SegmentKind.ORIGINAL) {
             SourceSpan span = segment.span();
             String sourceId = span.sourceId();
-            int start = span.startCodePoint();
-            int end = span.endCodePoint();
+            long start = span.startCodePoint();
+            long end = span.endCodePoint();
             // resolve [start, end) against the decoded source the caller kept
         }
     }
@@ -918,13 +945,13 @@ try {
     pipeline.prepare(source);
 } catch (InvalidSourceException ex) {
     String sourceId = ex.sourceId();
-    OptionalInt offset = ex.codePointOffset();
+    OptionalLong offset = ex.codePointOffset();
 } catch (LimitExceededException ex) {
     String limitName = ex.limitName();
 }
 ```
 
-Illustrative selective JSON, for the later CLI and for reviewers of the report shape. Field names are a proposal. This document does not add a JSON dependency to the core. The numbers below use the built-in estimator, zero overhead, and a preferred term of `checkout`. `It happened again at checkout.` is 30 code points, so its estimate is `(30 + 3) / 4 = 8`. That higher score is packed first and fills a budget of 8. `The customer saw a timeout.` is 27 code points and is omitted because it does not fit.
+Illustrative selective JSON, for the later CLI and for reviewers of the report shape. Field names are a proposal, not an MVP schema. This document does not add a JSON dependency to the core. Offset numbers are not limited to 32 bits. The numbers below use the initial built-in estimator, zero overhead, and a preferred term of `checkout`. `It happened again at checkout.` is 30 code points, so its estimate is `(30 + 3) / 4 = 8`. That higher score is packed first and fills a budget of 8. `The customer saw a timeout.` is 27 code points and is omitted because it does not fit. Message boundaries are not blank-line delimiters, so there is no `SEGMENT_BOUNDARY` span.
 
 ```json
 {
@@ -949,22 +976,34 @@ Illustrative selective JSON, for the later CLI and for reviewers of the report s
 }
 ```
 
-### 16.5 Open questions
+### 16.5 Decisions and remaining questions
 
-The body of this PRD assumes the recommended answer where one is named. A different maintainer decision should update the PRD in the same pull request as the code it affects.
+These choices are decided and are the baseline for implementation:
 
-1. **Java baseline.** Recommendation: Java 21, so the library can use records without requiring the newest long-term release. Java 25 is the newer long-term release at the time of writing and is a reasonable choice if both maintainers are willing to require it. Java 17 is the conservative alternative and makes some API shapes more awkward.
-2. **Maven coordinates and the copyright line used in source headers.** Recommendation: group `io.github.cbrwvy`, package `io.github.cbrwvy.contextforge`. The copyright owner string for file headers is still undecided and should be chosen before M1 adds source files.
-3. **Default resource guards.** The numbers in section 8 are proposed. Confirm or replace them before the first preview tag. They are guards, not capacity measurements.
-4. **Built-in estimator.** Recommendation: `(codePointCount + 3) / 4` with id `codepoints-divided-by-4`. Confirm the divisor, or ship no built-in estimator and require the caller to pass one. The second option is stricter and more honest, and it is slightly less convenient.
-5. **Near-duplicate algorithm.** Choose SimHash or MinHash, the n-gram width, and the default threshold at M5, using the fixture study. Decide then whether approximate groups may be collapsed or only grouped.
-6. **Case-insensitive patterns.** Deferred. Decide the case rule before any implementation. Do not treat `String.toLowerCase()` as interchangeable with Unicode case folding.
-7. **Command-line scope.** Recommendation: M6, after the library API has settled. Move a minimal CLI into the MVP only if a non-Java caller needs it sooner.
-8. **Release channel.** Recommendation: GitHub releases for preview jars, Maven Central after the coordinates and a 1.0 API policy are accepted. Neither channel is configured in this milestone.
-9. **Security policy.** Add `SECURITY.md` and enable private vulnerability reporting before the first tagged release. The contact and process are still open.
-10. **Unicode normalization forms.** Recommendation: leave NFC and NFD out of the MVP. If a caller needs NFC later, it should be a named transform that sets `transformed`. NFKC stays discouraged.
-11. **Byte offsets.** The MVP commits to code-point spans. Add byte offsets only if a real caller needs to point into the original file without decoding it again.
-12. **Weight values for the heuristic.** Freeze them in tests when M3 starts, and treat later edits as behavior changes.
+- Java 21.
+- Gradle with the Kotlin DSL, and a committed wrapper when the build is added.
+- Coordinates `io.github.cbrwvy:contextforge` and base package `io.github.cbrwvy.contextforge`.
+- One core JAR for the MVP.
+- Pluggable token estimation, with the initial code-point heuristic in section 5.4. No provider tokenizer in the core.
+- No required model provider, external service, or network access.
+- The CLI, near-duplicate detection, and summarization come after the MVP.
+
+Nothing below blocks merging this document or starting M1.
+
+Resolve during implementation, before the first preview tag:
+
+- The built-in estimator id and divisor, if a fixture shows the initial definition should change. Lock the chosen values in tests at M3.
+- Heuristic weights and the final tie-break key order, at M3.
+- The numeric guards in section 8. The listed values are starting points.
+- The copyright-owner string for source headers. Omit headers until it is chosen. M1 does not wait on it.
+
+Resolve at the milestone that needs them:
+
+- Near-duplicate algorithm, n-gram width, threshold, and whether approximate groups may be collapsed. M5, after the fixture study. SimHash and MinHash remain the candidates. Case folding is not part of that choice.
+- Release channel. GitHub Releases for preview jars and Maven Central after 1.0 are the working assumption. Neither is configured yet.
+- Security contact and `SECURITY.md`, before the first tagged release.
+
+Not in the MVP, and not required before a caller asks for them: case-insensitive patterns, NFC or NFD, and byte offsets. A later case-insensitive mode must name its case rule. `String.toLowerCase()` is not that specification by itself. NFKC stays discouraged.
 
 ## 17. Traceability to the idea
 

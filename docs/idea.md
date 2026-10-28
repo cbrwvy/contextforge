@@ -70,6 +70,8 @@ The default behavior must not silently lose or fabricate information. Exact sear
 5. **Optional AI extensions:** pluggable embeddings and hierarchical summarization without hard coupling to a provider.
 6. **Integration and release:** stable public API, examples, documentation, CI, versioning, packaging, and performance regression checks.
 
+`docs/PRD.md` is the milestone contract. It keeps the first library slice to Preserve, Selective, exact duplicates, and heuristic packing. Near-duplicate detection, summarization, and the command-line wrapper follow that slice.
+
 ## Initial non-goals
 
 - Building a general-purpose chat application or hosted AI service.
