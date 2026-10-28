@@ -430,6 +430,7 @@ Failures split into caller mistakes, defective input, resource guards, and ordin
 | Blank id, empty pattern, negative budget, heuristic selection with neither a task nor patterns | `IllegalArgumentException` | Construction fails before reading input |
 | Duplicate id, null message text, malformed structured field | `InvalidSourceException` | Carries source id and, when known, a code-point offset. Omits source text by default |
 | Byte sequence illegal for the charset | `InvalidSourceException` | Caused by the decoder failure |
+| Unpaired UTF-16 surrogate | `IllegalArgumentException` from `CodePoints`. `InvalidSourceException` when a source read hits one | Not a scalar value. `CodePoints` throws when a read would consume the surrogate. The message includes the UTF-16 index and omits the text. Source reads, added in M1.2, use the same check as units arrive. A read may hold one high surrogate to finish a pair split across chunks and does not buffer the input to do so |
 | I/O error while reading | checked `IOException` | Declared on `prepare` and `write` |
 | Pattern count, pattern length, or a caller-set input cap exceeded | `LimitExceededException` | Thrown before unbounded allocation where the limit can be checked up front |
 | Stored matches or retained segments hit their cap | normal report flags | `matchesTruncated` or `analysisTruncated`. A selective tail uses one `TRUNCATED` span as defined in section 3.6 |
@@ -475,9 +476,11 @@ The public offset unit is the Unicode code point (scalar value) in decoded text.
 
 Decoded text is the scalar sequence produced by the charset decoder, before BOM stripping and before normalization. A leading U+FEFF that came from a UTF-8 BOM is a code point at the start of that sequence. Stripping it is transform `UTF8_BOM`. The offset map records the deletion, later spans skip that code point, and `transformed` is set.
 
+A scalar value is a code point in U+0000..U+D7FF or U+E000..U+10FFFF. An unpaired UTF-16 surrogate is malformed input, not a scalar value. `Character.codePointAt` counts that surrogate as one code point. ContextForge does not. `CodePoints` rejects it when a read would consume it, with `IllegalArgumentException`, the UTF-16 index, and no source text. A span stores offsets and does not inspect text. Streaming ingestion is M1.2. That path rejects the same sequences while reading. It may hold one high surrogate to recognize a pair split across reads, and it does not buffer the rest of the input for the check.
+
 Consequences the API must document:
 
-- Callers with a Java `String` convert with `Character.offsetByCodePoints` or an equivalent helper the library provides.
+- Callers with a Java `String` convert with `CodePoints`. The helper counts scalar values and rejects an unpaired surrogate.
 - A grapheme cluster, such as a family emoji joined by ZWJ, can be several code points. The MVP does not snap spans to grapheme boundaries. A literal match may begin or end inside a cluster. Fixtures must include a ZWJ sequence so this stays visible.
 - Combining character sequences are matched as separate code points. The library does not apply NFC or NFD by default, because those forms change the sequence.
 - When a transform changes length, `end - start` on the decoded span is not the code-point length of the segment string. Quote fidelity and token estimates use the rules in section 4.2.
@@ -502,6 +505,7 @@ Required fixture coverage:
 - mixed CR, LF, and CRLF, including a CRLF split across two reads
 - a UTF-8 BOM
 - an illegal UTF-8 sequence, asserting failure
+- an unpaired UTF-16 surrogate passed to `CodePoints`, asserting failure
 - a pattern match that crosses a read boundary
 
 Right-to-left text is stored in logical Unicode order. The library does not reorder for display.

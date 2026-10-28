@@ -6,9 +6,11 @@ import java.util.Objects;
  * A half-open range of Unicode code points {@code [startCodePoint, endCodePoint)}
  * in one identified source.
  *
- * <p>Offsets refer to decoded text, before optional normalization. They count
- * Unicode scalar values. An empty span, where the two ends are equal, is valid.
- * Either end may be greater than {@link Integer#MAX_VALUE}.
+ * <p>Offsets count Unicode scalar values in well-formed decoded text, before
+ * optional normalization. A span does not read that text. {@link CodePoints}
+ * rejects an unpaired UTF-16 surrogate when a read would consume it. An empty
+ * span, where the two ends are equal, is valid. Either end may be greater than
+ * {@link Integer#MAX_VALUE}.
  */
 public record SourceSpan(Identifier sourceId, long startCodePoint, long endCodePoint) {
 

@@ -38,7 +38,7 @@ Local `./gradlew test build` passed on Temurin 21. Completed in https://github.c
 ### M1.2 — Input and streaming decode (Java developer)
 
 - [ ] Support `String`/`CharSequence`, `Reader`, `InputStream` with explicit charset, and structured messages.
-- [ ] Define source ownership and validation behavior; reject malformed charset input.
+- [ ] Define source ownership and validation behavior; reject malformed charset input and unpaired UTF-16 surrogates while reading, without buffering the source.
 - [ ] Process incremental reads, including code points split across chunks, without buffering an entire Preserve stream.
 - [ ] Add ASCII, Cyrillic, CJK, emoji/ZWJ, combining-mark, BOM, and invalid-UTF-8 fixtures.
 - [ ] Test a generated input larger than the configured test heap; verify bounded-memory streaming behavior.

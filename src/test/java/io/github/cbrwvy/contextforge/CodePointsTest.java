@@ -66,11 +66,41 @@ class CodePointsTest {
     }
 
     @Test
-    void unpairedSurrogateCountsAsOneUnit() {
-        String surrogate = "\uD800";
+    void rejectsUnpairedSurrogateWhenConsumed() {
+        assertUnpaired("\uD800", 0);
+        assertUnpaired("\uDC00", 0);
+        assertUnpaired("a\uD800", 1);
+        assertUnpaired("a\uDC00", 1);
+        assertUnpaired("\uD800\uD800", 0);
+        assertUnpaired("\uD800a", 0);
+        assertUnpaired("ab\uD800c", 2);
+    }
 
-        assertEquals(1, CodePoints.count(surrogate));
-        assertEquals(surrogate, CodePoints.slice(surrogate, 0, 1));
+    @Test
+    void readsTheWellFormedPrefixBeforeAnUnpairedSurrogate() {
+        String text = "ab\uD800";
+
+        assertEquals(2, CodePoints.utf16Index(text, 2));
+        assertEquals("ab", CodePoints.slice(text, 0, 2));
+        assertEquals("", CodePoints.slice(text, 2, 2));
+        assertUnpaired(text, 2);
+    }
+
+    private static void assertUnpaired(String text, int utf16Index) {
+        String message = "unpaired surrogate at UTF-16 index " + utf16Index;
+        IllegalArgumentException counted = assertThrows(
+                IllegalArgumentException.class,
+                () -> CodePoints.count(text));
+        IllegalArgumentException indexed = assertThrows(
+                IllegalArgumentException.class,
+                () -> CodePoints.utf16Index(text, text.length()));
+        IllegalArgumentException sliced = assertThrows(
+                IllegalArgumentException.class,
+                () -> CodePoints.slice(text, 0, text.length()));
+
+        assertEquals(message, counted.getMessage());
+        assertEquals(message, indexed.getMessage());
+        assertEquals(message, sliced.getMessage());
     }
 
     @Test

@@ -3,11 +3,16 @@ package io.github.cbrwvy.contextforge;
 import java.util.Objects;
 
 /**
- * Conversions between a Java character sequence and Unicode code-point offsets.
+ * Conversions between a Java character sequence and Unicode scalar-value offsets.
  *
- * <p>Counts follow {@link Character#codePointAt(CharSequence, int)}. An unpaired
- * surrogate counts as one unit. The helper does not normalize text and does not
- * snap a range to a grapheme cluster, so a span may begin or end inside one.
+ * <p>An unpaired UTF-16 surrogate is not a scalar value. A read that would consume
+ * one throws {@link IllegalArgumentException}. The message carries the UTF-16 index
+ * and omits the text. A high surrogate followed by a low surrogate is one scalar
+ * value. The helper does not normalize text and does not snap a range to a grapheme
+ * cluster, so a span may begin or end inside one.
+ *
+ * <p>Only the units a call must read are validated. Streaming sources apply the same
+ * check as they read, and that path is not implemented here.
  */
 public final class CodePoints {
 
@@ -15,24 +20,29 @@ public final class CodePoints {
     }
 
     /**
-     * Returns the number of Unicode code points in {@code text}.
+     * Returns the number of Unicode scalar values in {@code text}.
+     *
+     * @throws IllegalArgumentException if a read consumes an unpaired surrogate
      */
     public static long count(CharSequence text) {
         Objects.requireNonNull(text, "text");
         int length = text.length();
         long count = 0;
         for (int index = 0; index < length; ) {
-            index += Character.charCount(Character.codePointAt(text, index));
+            index += scalarUnits(text, index);
             count++;
         }
         return count;
     }
 
     /**
-     * Returns the UTF-16 index of the code point at {@code codePointOffset}.
-     * An offset equal to {@link #count(CharSequence)} returns {@code text.length()}.
+     * Returns the UTF-16 index of the scalar value at {@code codePointOffset}.
+     * An offset equal to the number of scalar values before that position returns
+     * the corresponding UTF-16 index, including {@code text.length()} at the end.
+     * Units past the requested offset are not read.
      *
-     * @throws IllegalArgumentException if {@code codePointOffset} is negative or past the text
+     * @throws IllegalArgumentException if {@code codePointOffset} is negative, past the
+     *     well-formed prefix, or a read would consume an unpaired surrogate
      */
     public static int utf16Index(CharSequence text, long codePointOffset) {
         Objects.requireNonNull(text, "text");
@@ -46,7 +56,7 @@ public final class CodePoints {
             if (seen == codePointOffset) {
                 return index;
             }
-            index += Character.charCount(Character.codePointAt(text, index));
+            index += scalarUnits(text, index);
             seen++;
         }
         if (seen == codePointOffset) {
@@ -57,9 +67,10 @@ public final class CodePoints {
     }
 
     /**
-     * Returns the code points in {@code [startCodePoint, endCodePoint)} as a string.
+     * Returns the scalar values in {@code [startCodePoint, endCodePoint)} as a string.
      *
-     * @throws IllegalArgumentException if the range is inverted or falls outside {@code text}
+     * @throws IllegalArgumentException if the range is inverted, falls outside the
+     *     well-formed prefix, or a read would consume an unpaired surrogate
      */
     public static String slice(CharSequence text, long startCodePoint, long endCodePoint) {
         Objects.requireNonNull(text, "text");
@@ -73,5 +84,27 @@ public final class CodePoints {
         int start = utf16Index(text, startCodePoint);
         int end = utf16Index(text, endCodePoint);
         return text.subSequence(start, end).toString();
+    }
+
+    /**
+     * Returns the number of UTF-16 units in the scalar value at {@code index}.
+     */
+    private static int scalarUnits(CharSequence text, int index) {
+        char unit = text.charAt(index);
+        if (Character.isHighSurrogate(unit)) {
+            int next = index + 1;
+            if (next < text.length() && Character.isLowSurrogate(text.charAt(next))) {
+                return 2;
+            }
+            throw unpairedSurrogate(index);
+        }
+        if (Character.isLowSurrogate(unit)) {
+            throw unpairedSurrogate(index);
+        }
+        return 1;
+    }
+
+    private static IllegalArgumentException unpairedSurrogate(int utf16Index) {
+        return new IllegalArgumentException("unpaired surrogate at UTF-16 index " + utf16Index);
     }
 }
